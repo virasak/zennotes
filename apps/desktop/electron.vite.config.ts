@@ -160,9 +160,7 @@ function rendererManualChunk(id: string): string | undefined {
     return 'vendor-function-plot'
   }
 
-  // Keep the tiny `?url` wasm-locator modules out of this chunk so it stays a
-  // pure dynamic import, only fetched when a Typst formula is actually rendered.
-  if (id.includes('/@myriaddreamin/') && !id.includes('.wasm')) {
+  if (id.includes('@virasak/typst-math-wasm') && !id.includes('.wasm')) {
     return 'vendor-typst'
   }
 
@@ -256,9 +254,7 @@ export default defineConfig({
     // would otherwise rewrite.
     optimizeDeps: {
       exclude: [
-        '@myriaddreamin/typst.ts',
-        '@myriaddreamin/typst-ts-web-compiler',
-        '@myriaddreamin/typst-ts-renderer',
+        '@virasak/typst-math-wasm',
         'harper.js'
       ]
     },
