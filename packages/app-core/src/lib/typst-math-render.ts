@@ -7,38 +7,27 @@
  * the same under Typst and vice versa, which is inherent to the feature.
  *
  * How it works:
- *   - `@myriaddreamin/typst.ts` ships a WebAssembly Typst compiler (source →
- *     vector artifact) plus a WASM renderer (artifact → SVG). Both are heavy
- *     (~28 MB + ~1 MB) so they are dynamically imported and initialised lazily
- *     the first time a Typst formula is rendered, so a note without Typst math
- *     never pays for them. The WASM is bundled offline via Vite `?url` imports,
- *     and the compiler embeds the default Typst fonts (New Computer Modern Math
- *     et al.), so rendering never needs the network.
+ *   - `@virasak/typst-math-wasm` is a lightweight, single WebAssembly module
+ *     (compiled from Rust via wasm-pack) that compiles Typst markup directly to
+ *     SVG. It embeds the New Computer Modern Math fonts, so rendering never needs
+ *     the network. The WASM is bundled offline via a Vite `?url` import and
+ *     fetched lazily the first time a Typst formula is rendered, so a note
+ *     without Typst math never pays for the ~16 MB binary.
  *   - Each formula compiles a tiny auto-sized Typst document and the resulting
  *     SVG is post-processed: black glyph fills become `currentColor` (so the
  *     formula follows the active theme with no re-render on theme change) and
  *     the intrinsic pt dimensions become `em` sizes (so it scales with the
  *     surrounding font size, like KaTeX).
  *
- * The global `$typst` instance is stateful during a compile, so compiles are
- * serialised through a single queue. Results are memoised by (display, source).
+ * The WASM module is stateful during a compile, so compiles are serialised
+ * through a single queue. Results are memoised by (display, source).
  */
 
 // Bundled offline: Vite emits these as asset URLs. On web / the desktop dev
 // server they are fetched over http; the packaged desktop app (file://) routes
 // them through the `zen-typst://` protocol (see `bundledAssetUrl`).
 import { bundledAssetUrl } from './bundled-asset-url'
-import compilerWasmUrl from '@myriaddreamin/typst-ts-web-compiler/wasm?url'
-import rendererWasmUrl from '@myriaddreamin/typst-ts-renderer/wasm?url'
-// The New Computer Modern family (matching KaTeX's Computer Modern look). Bundled
-// because the compiler ships no fonts of its own and its default is to fetch them
-// from a CDN, which fails offline and under the desktop CSP.
-import newCMRegularUrl from './typst-fonts/NewCM10-Regular.otf?url'
-import newCMBoldUrl from './typst-fonts/NewCM10-Bold.otf?url'
-import newCMItalicUrl from './typst-fonts/NewCM10-Italic.otf?url'
-import newCMMathUrl from './typst-fonts/NewCMMath-Regular.otf?url'
-
-const FONT_URLS = [newCMRegularUrl, newCMBoldUrl, newCMItalicUrl, newCMMathUrl]
+import typstMathWasmUrl from '@virasak/typst-math-wasm/wasm?url'
 
 /** Text size we compile every formula at; SVG dimensions come back in points,
  *  and are converted to `em` relative to this so the rendered math scales with
@@ -58,23 +47,8 @@ export type TypstRenderResult =
   | { ok: true; svg: string }
   | { ok: false; error: string }
 
-interface TypstInitOptions {
-  getModule: () => unknown
-  beforeBuild?: unknown[]
-}
-
 interface TypstSnippetLike {
-  setCompilerInitOptions(options: TypstInitOptions): void
-  setRendererInitOptions(options: TypstInitOptions): void
   svg(options: { mainContent: string }): Promise<string>
-}
-
-interface TypstModule {
-  $typst: TypstSnippetLike
-  initOptions: {
-    disableDefaultFontAssets: () => unknown
-    loadFonts: (fonts: string[]) => unknown
-  }
 }
 
 let typstPromise: Promise<TypstSnippetLike> | null = null
@@ -82,26 +56,14 @@ let typstPromise: Promise<TypstSnippetLike> | null = null
 async function loadTypst(): Promise<TypstSnippetLike> {
   if (!typstPromise) {
     typstPromise = (async () => {
-      const mod = (await import('@myriaddreamin/typst.ts')) as unknown as TypstModule
-      const $typst = mod.$typst
-      // wasm-bindgen accepts a URL/Request/Response/BufferSource; a URL string
-      // triggers `fetch()` and instantiates the streamed `application/wasm`
-      // response (falling back to arrayBuffer instantiation if needed).
-      //
-      // Fonts: the compiler ships none and defaults to fetching its text fonts
-      // from a jsdelivr CDN, which fails offline and is blocked by the desktop
-      // CSP. `disableDefaultFontAssets()` turns that off and `loadFonts()`
-      // supplies our bundled New Computer Modern family instead, so math renders
-      // with no network access.
-      $typst.setCompilerInitOptions({
-        getModule: () => bundledAssetUrl(compilerWasmUrl, 'zen-typst'),
-        beforeBuild: [
-          mod.initOptions.disableDefaultFontAssets(),
-          mod.initOptions.loadFonts(FONT_URLS.map((url) => bundledAssetUrl(url, 'zen-typst')))
-        ]
-      })
-      $typst.setRendererInitOptions({ getModule: () => bundledAssetUrl(rendererWasmUrl, 'zen-typst') })
-      return $typst
+      const mod = await import('@virasak/typst-math-wasm')
+      const targetUrl = bundledAssetUrl(typstMathWasmUrl, 'zen-typst')
+      await mod.default(targetUrl)
+      return {
+        svg: async ({ mainContent }: { mainContent: string }) => {
+          return mod.compile_to_svg(mainContent)
+        }
+      }
     })()
   }
   return typstPromise
@@ -216,8 +178,8 @@ function rememberSvg(key: string, result: TypstRenderResult): TypstRenderResult 
   return result
 }
 
-// The shared `$typst` instance mutates its own state during a compile, so only
-// one compile may run at a time (mirrors the TikZ main-process render queue).
+// The WASM module mutates internal state during a compile, so only one compile
+// may run at a time (mirrors the TikZ main-process render queue).
 let renderQueue: Promise<unknown> = Promise.resolve()
 
 /**
